@@ -8,6 +8,7 @@
 #include "caffe/layer.hpp"
 #include "caffe/layer_factory.hpp"
 #include "caffe/layers/conv_layer.hpp"
+#include "caffe/layers/compress_conv_layer.hpp"
 #include "caffe/layers/deconv_layer.hpp"
 #include "caffe/layers/lrn_layer.hpp"
 #include "caffe/layers/pooling_layer.hpp"
@@ -74,6 +75,32 @@ shared_ptr<Layer<Dtype> > GetConvolutionLayer(
 }
 
 REGISTER_LAYER_CREATOR(Convolution, GetConvolutionLayer);
+
+/************ For dynamic network surgery ***************/
+template <typename Dtype>
+shared_ptr<Layer<Dtype> > GetCConvolutionLayer(
+    const LayerParameter& param) {
+  ConvolutionParameter_Engine engine = param.convolution_param().engine();
+  if (engine == ConvolutionParameter_Engine_DEFAULT) {
+    engine = ConvolutionParameter_Engine_CAFFE;
+#ifdef USE_CUDNN
+    engine = ConvolutionParameter_Engine_CUDNN;
+#endif
+  }
+  if (engine == ConvolutionParameter_Engine_CAFFE) {
+    return shared_ptr<Layer<Dtype> >(new CConvolutionLayer<Dtype>(param));
+#ifdef USE_CUDNN
+  } else if (engine == ConvolutionParameter_Engine_CUDNN) {
+    return shared_ptr<Layer<Dtype> >(new CuDNNConvolutionLayer<Dtype>(param));
+#endif
+  } else {
+    LOG(FATAL) << "Layer " << param.name() << " has unknown engine.";
+  }
+}
+
+//Comment on this for the error "Check failed: registry.count(type) == 0 (1 vs. 0) Layer type CConvolution already registered."
+//REGISTER_LAYER_CREATOR(CConvolution, GetCConvolutionLayer);
+/********************************************************/
 
 // Get deconvolution layer according to engine.
 template <typename Dtype>

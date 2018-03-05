@@ -322,7 +322,7 @@ message ParamSpec {
 // NOTE
 // Update the next available ID when you add a new LayerParameter field.
 //
-// LayerParameter next available layer-specific ID: 147 (last added: recurrent_param)
+// LayerParameter next available layer-specific ID: 149 (last added: cinner_product_param)
 message LayerParameter {
   optional string name = 1; // the layer name
   optional string type = 2; // the layer type
@@ -419,6 +419,8 @@ message LayerParameter {
   optional ThresholdParameter threshold_param = 128;
   optional TileParameter tile_param = 138;
   optional WindowDataParameter window_data_param = 129;
+  optional CConvolutionParameter cconvolution_param = 147;
+  optional CInnerProductParameter cinner_product_param = 148;
 }
 
 // Message that stores parameters used to apply transformation
@@ -1423,4 +1425,22 @@ message PReLUParameter {
   optional FillerParameter filler = 1;
   // Whether or not slope parameters are shared across channels.
   optional bool channel_shared = 2 [default = false];
+}
+
+message CConvolutionParameter {
+  optional float gamma = 1 [default = 0.001]; // The compress parameter of current layer
+  optional float power = 2 [default = 1];
+  optional float iter_stop = 3 [default = 10000];
+  optional float c_rate = 4 [default = 3];
+  optional FillerParameter weight_mask_filler = 5; // The filler for the weight
+  optional FillerParameter bias_mask_filler = 6;   // The filler for the bias
+}
+
+message CInnerProductParameter {
+  optional float gamma = 1 [default = 0.001]; // The compress parameter of current layer
+  optional float power = 2 [default = 1];
+  optional float iter_stop = 3 [default = 8000];
+  optional float c_rate = 4 [default = 3];
+  optional FillerParameter weight_mask_filler = 5; // The filler for the weight
+  optional FillerParameter bias_mask_filler = 6;   // The filler for the bias
 }
