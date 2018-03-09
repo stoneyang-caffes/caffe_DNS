@@ -46,6 +46,9 @@ class CConvolutionLayer : public BaseConvolutionLayer<Dtype> {
   Dtype crate; 
   Dtype mu, std;    
   int iter_stop_;
+  string pruning_type;
+  Dtype sparsity_ratio;
+  Dtype pruning_threshold;
 };
 
 }  // namespace caffe

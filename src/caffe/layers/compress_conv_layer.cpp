@@ -9,16 +9,18 @@
 
 #include "caffe/layers/compress_conv_layer.hpp"
 
+using namespace std;
+
 namespace caffe {
 
 template <typename Dtype>
 void CConvolutionLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype>*>& bottom,
       const vector<Blob<Dtype>*>& top) {
-  BaseConvolutionLayer <Dtype>::LayerSetUp(bottom, top); 
-  
-  /************ For dynamic network surgery ***************/
+  BaseConvolutionLayer <Dtype>::LayerSetUp(bottom, top);
+
   CConvolutionParameter cconv_param = this->layer_param_.cconvolution_param();
-	
+  this->pruning_type = cconv_param.pruning_type();
+  LOG(INFO) << "Pruning method: " << this->pruning_type;
   if (this->blobs_.size() == 2 && (this->bias_term_)) {
     this->blobs_.resize(4);
     // Intialize and fill the weightmask & biasmask
@@ -38,19 +40,43 @@ void CConvolutionLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype>*>& bottom,
         cconv_param.bias_mask_filler()));
     bias_mask_filler->Fill(this->blobs_[1].get());
   }
-	
   // Intializing the tmp tensor
   this->weight_tmp_.Reshape(this->blobs_[0]->shape());
-  this->bias_tmp_.Reshape(this->blobs_[1]->shape());  
-	
-  // Intialize the hyper-parameters
-  this->std = 0;
-  this->mu = 0;   
-  this->gamma = cconv_param.gamma(); 
-  this->power = cconv_param.power();
-  this->crate = cconv_param.c_rate();  
-  this->iter_stop_ = cconv_param.iter_stop();
-  /********************************************************/
+  this->bias_tmp_.Reshape(this->blobs_[1]->shape());
+  if (this->pruning_type == "dns") {
+    /************ For dynamic network surgery ***************/
+    // Intialize the hyper-parameters
+    this->std = 0;
+    this->mu = 0;   
+    this->gamma = cconv_param.gamma(); 
+    this->power = cconv_param.power();
+    this->crate = cconv_param.c_rate();  
+    this->iter_stop_ = cconv_param.iter_stop();
+    LOG(INFO) << "gamma: " << gamma;
+    LOG(INFO) << "power: " << power;
+    LOG(INFO) << "crate: " << crate;
+    LOG(INFO) << "iter stop: " << iter_stop_;
+    /********************************************************/
+  } else if (this->pruning_type == "han") {
+    /*************** For Han Song's method ******************/
+    this->sparsity_ratio = cconv_param.sparsity_ratio();
+    LOG(INFO) << "sparsity_ratio: " << this->sparsity_ratio;
+    const Dtype* weight = this->blobs_[0]->mutable_cpu_data();
+    int count = this->blobs_[0]->count();
+    // int count = this->blobs_[0]->count() + this->blobs_[1]->count();
+    vector<Dtype> sorted_weights(count);
+    for (unsigned int k = 0; k < count; ++k) {
+      sorted_weights[k] = fabs(weight[k]);
+	}
+    sort(sorted_weights.begin(), sorted_weights.end());
+    int pruning_index = int(count*sparsity_ratio);
+    this->pruning_threshold = sorted_weights[pruning_index-1];
+    LOG(INFO) << "sparsity ratio: " << this->sparsity_ratio;
+    LOG(INFO) << "pruning threshold: " << this->pruning_threshold;
+    /********************************************************/
+  } else {
+    LOG(FATAL) << "Unknown pruning type! " << this->pruning_type;
+  }
 }
 
 template <typename Dtype>
@@ -73,19 +99,20 @@ void CConvolutionLayer<Dtype>::compute_output_shape() {
 template <typename Dtype>
 void CConvolutionLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
       const vector<Blob<Dtype>*>& top) {    
-  const Dtype* weight = this->blobs_[0]->mutable_cpu_data();    
-  Dtype* weightMask = this->blobs_[2]->mutable_cpu_data(); 
-  Dtype* weightTmp = this->weight_tmp_.mutable_cpu_data(); 
+  const Dtype* weight = this->blobs_[0]->mutable_cpu_data();
+  Dtype* weightMask = this->blobs_[2]->mutable_cpu_data();
+  Dtype* weightTmp = this->weight_tmp_.mutable_cpu_data();
   const Dtype* bias = NULL;
-  Dtype* biasMask = NULL;  
+  Dtype* biasMask = NULL;
   Dtype* biasTmp = NULL;
   if (this->bias_term_) {
-    bias = this->blobs_[1]->mutable_cpu_data(); 
+    bias = this->blobs_[1]->mutable_cpu_data();
     biasMask = this->blobs_[3]->mutable_cpu_data();
     biasTmp = this->bias_tmp_.mutable_cpu_data();
   }
 
-  if (this->phase_ == TRAIN) {
+  if (this->phase_ == TRAIN && this->pruning_type == "dns") {
+    /************ For dynamic network surgery ***************/
     // Calculate the mean and standard deviation of learnable parameters 
     if (this->std == 0 && this->iter_ == 0) {
       unsigned int ncount = 0;
@@ -106,31 +133,13 @@ void CConvolutionLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
       	}       
       }
       this->mu /= ncount;
-      this->std -= ncount*mu*mu; 
+      this->std -= ncount*mu*mu;
       this->std /= ncount;
       this->std = sqrt(std);
-      LOG(INFO) << mu << "  " << std << "  " << ncount;     
+      LOG(INFO) << "Mean value: " << mu;
+      LOG(INFO) << "Std. variance: " << std;
+      LOG(INFO) << "Non-zero count: " << ncount;
     }
-		
-    // Demonstrate the sparsity of compressed convolutional layer
-    /********************************************************/
-    if (this->iter_ % 1000 == 0) {
-      unsigned int ncount = 0;
-      for (unsigned int k = 0; k < this->blobs_[0]->count(); ++k) {
-        if (weightMask[k]*weight[k] != 0) {
-          ncount++;
-        }
-      }
-      if (this->bias_term_) {
-        for (unsigned int k = 0; k < this->blobs_[1]->count(); ++k) {
-          if (biasMask[k]*bias[k] != 0) {
-            ncount++;
-          }
-        }
-      }
-      LOG(INFO) << ncount;
-    }
-    /********************************************************/		
 		
     // Calculate the weight mask and bias mask with probability
     Dtype r = static_cast<Dtype>(rand())/static_cast<Dtype>(RAND_MAX);
@@ -152,7 +161,52 @@ void CConvolutionLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
         }
       }
     }
+    /********************************************************/
+  } else if (this->phase_ == TRAIN && this->pruning_type == "han") {
+    /*************** For Han Song's method ******************/
+    if (this->iter_ == 0) {
+      for (unsigned int k = 0; k < this->blobs_[0]->count(); ++k) {
+        if (fabs(weight[k]) >= this->pruning_threshold) {
+          weightMask[k] = 1;
+	    } else if (fabs(weight[k]) < this->pruning_threshold) {
+          weightMask[k] = 0;
+	    }
+	  }
+      // (FanYang) bias masks generation, we temporarilly do not support this
+      // if (this->bias_term_) {
+        // for (unsigned int k = 0; k < this->blobs_[1]->count(); ++k) {
+          // if (fabs(bias[k]) >= pruning_threshold) {
+            // biasMask[k] = 1;
+	      // } else if (fabs(bias[k]) < pruning_threshold) {
+            // biasMask[k] = 0;
+	      // }
+	    // }
+	  // }
+      // (FanYang) bias masks generation, we temporarilly do not support this
+    /********************************************************/
+    }
   }
+
+  // Demonstrate the sparsity of compressed convolutional layer
+  /********************************************************/
+  if (this->iter_ % 1000 == 0 && this->iter_ != 0) {
+    unsigned int ncount = 0;
+    for (unsigned int k = 0; k < this->blobs_[0]->count(); ++k) {
+      if (weightMask[k]*weight[k] != 0) {
+        ncount++;
+      }
+    }
+    if (this->bias_term_) {
+      for (unsigned int k = 0; k < this->blobs_[1]->count(); ++k) {
+        if (biasMask[k]*bias[k] != 0) {
+          ncount++;
+        }
+      }
+    }
+    LOG(INFO) << "Current non-zero count: " << ncount;
+    LOG(INFO) << "Current sparsity ratio: " << 1. - ncount / float(this->blobs_[0]->count());
+  }
+  /********************************************************/
     
   // Calculate the current (masked) weight and bias
   for (unsigned int k = 0; k < this->blobs_[0]->count(); ++k) {

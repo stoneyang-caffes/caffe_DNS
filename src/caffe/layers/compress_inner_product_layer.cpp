@@ -53,9 +53,9 @@ void CInnerProductLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype>*>& bottom,
   }  // parameter initialization
   this->param_propagate_down_.resize(this->blobs_.size(), true);
   
-  /************ For dynamic network surgery ***************/
   CInnerProductParameter cinner_param = this->layer_param_.cinner_product_param();
-	
+  this->pruning_type = cinner_param.pruning_type();
+  LOG(INFO) << "Pruning method: " << this->pruning_type;
   if (this->blobs_.size()==2 && (this->bias_term_)) {
     this->blobs_.resize(4);
     // Intialize and fill the weightmask & biasmask
@@ -79,15 +79,40 @@ void CInnerProductLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype>*>& bottom,
   // Intialize the tmp tensor 
   this->weight_tmp_.Reshape(this->blobs_[0]->shape());
   this->bias_tmp_.Reshape(this->blobs_[1]->shape());  
-
-  // Intialize the hyper-parameters
-  this->std = 0;
-  this->mu = 0;  
-  this->gamma = cinner_param.gamma(); 
-  this->power = cinner_param.power();
-  this->crate = cinner_param.c_rate();  
-  this->iter_stop_ = cinner_param.iter_stop();    
-  /********************************************************/
+  if (this->pruning_type == "dns") {
+    /************ For dynamic network surgery ***************/
+    // Intialize the hyper-parameters
+    this->std = 0;
+    this->mu = 0;   
+    this->gamma = cinner_param.gamma(); 
+    this->power = cinner_param.power();
+    this->crate = cinner_param.c_rate();  
+    this->iter_stop_ = cinner_param.iter_stop();
+    LOG(INFO) << "gamma: " << gamma;
+    LOG(INFO) << "power: " << power;
+    LOG(INFO) << "crate: " << crate;
+    LOG(INFO) << "iter_stop: " << iter_stop_;
+    /********************************************************/
+  } else if (this->pruning_type == "han") {
+    /*************** For Han Song's method ******************/
+    this->sparsity_ratio = cinner_param.sparsity_ratio();
+    LOG(INFO) << "sparsity_ratio: " << this->sparsity_ratio;
+    const Dtype* weight = this->blobs_[0]->mutable_cpu_data();
+    int count = this->blobs_[0]->count();
+    // int count = this->blobs_[0]->count() + this->blobs_[1]->count();
+    vector<Dtype> sorted_weights(count);
+    for (unsigned int k = 0; k < count; ++k) {
+      sorted_weights[k] = fabs(weight[k]);
+	}
+    sort(sorted_weights.begin(), sorted_weights.end());
+    int pruning_index = int(count*sparsity_ratio);
+    this->pruning_threshold = sorted_weights[pruning_index-1];
+    LOG(INFO) << "sparsity ratio: " << this->sparsity_ratio;
+    LOG(INFO) << "pruning threshold: " << this->pruning_threshold;
+    /********************************************************/
+  } else {
+    LOG(FATAL) << "Unknown pruning type! " << this->pruning_type;
+  }
 }
 
 template <typename Dtype>
@@ -131,7 +156,8 @@ void CInnerProductLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
     biasTmp = this->bias_tmp_.mutable_cpu_data();
   }
    
-  if (this->phase_ == TRAIN){
+  if (this->phase_ == TRAIN && this->pruning_type == "dns"){
+    /************ For dynamic network surgery ***************/
     // Calculate the mean and standard deviation of learnable parameters
     if (this->std == 0 && this->iter_== 0) {
       unsigned int ncount = 0;
@@ -155,28 +181,10 @@ void CInnerProductLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
       this->std -= ncount*mu*mu;
       this->std /= ncount;
       this->std = sqrt(std);
-      LOG(INFO) << mu << "  " << std << "  " << ncount;
+      LOG(INFO) << "Mean value: " << mu;
+      LOG(INFO) << "Std. variance: " << std;
+      LOG(INFO) << "Non-zero count: " << ncount;
     }
-		
-    // Demonstrate the sparsity of compressed fully-connected layer
-    /********************************************************/
-    if (this->iter_ % 100 == 0){
-      unsigned int ncount = 0;
-      for (unsigned int k = 0; k < this->blobs_[0]->count(); ++k) {
-        if (weightMask[k]*weight[k] != 0) {
-          ncount++;
-        }
-      }
-      if (this->bias_term_) {
-        for (unsigned int k = 0;k < this->blobs_[1]->count(); ++k) {
-          if (biasMask[k]*bias[k] != 0) {
-            ncount++;
-          }
-        }       
-      }
-      LOG(INFO) << ncount;
-    }	
-    /********************************************************/	
 		
     // Calculate the weight mask and bias mask with probability
     Dtype r = static_cast<Dtype>(rand())/static_cast<Dtype>(RAND_MAX);
@@ -198,8 +206,52 @@ void CInnerProductLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
         }
       }
     }
-  }  
-	
+  } else if (this->phase_ == TRAIN && this->pruning_type == "han") {
+    /*************** For Han Song's method ******************/
+    if (this->iter_ == 0) {
+      for (unsigned int k = 0; k < this->blobs_[0]->count(); ++k) {
+        if (fabs(weight[k]) >= this->pruning_threshold) {
+          weightMask[k] = 1;
+	    } else if (fabs(weight[k]) < this->pruning_threshold) {
+          weightMask[k] = 0;
+	    }
+	  }
+      // (FanYang) bias masks generation, we temporarilly do not support this
+      // if (this->bias_term_) {
+        // for (unsigned int k = 0; k < this->blobs_[1]->count(); ++k) {
+          // if (fabs(bias[k]) >= pruning_threshold) {
+            // biasMask[k] = 1;
+	      // } else if (fabs(bias[k]) < pruning_threshold) {
+            // biasMask[k] = 0;
+	      // }
+	    // }
+	  // }
+      // (FanYang) bias masks generation, we temporarilly do not support this    
+      /********************************************************/
+    }
+  }
+
+  // Demonstrate the sparsity of compressed fully-connected layer
+  /********************************************************/
+  if (this->iter_ % 1000 == 0 && this->iter_ != 0) {
+    unsigned int ncount = 0;
+    for (unsigned int k = 0; k < this->blobs_[0]->count(); ++k) {
+      if (weightMask[k]*weight[k] != 0) {
+        ncount++;
+      }
+    }
+    if (this->bias_term_) {
+      for (unsigned int k = 0;k < this->blobs_[1]->count(); ++k) {
+        if (biasMask[k]*bias[k] != 0) {
+          ncount++;
+        }
+      }       
+    }
+    LOG(INFO) << "Current non-zero count: " << ncount;
+    LOG(INFO) << "Current sparsity ratio: " << 1. - ncount / float(this->blobs_[0]->count());
+  }	
+  /********************************************************/
+  
   // Calculate the current (masked) weight and bias
   for (unsigned int k = 0; k < this->blobs_[0]->count(); ++k) {
     weightTmp[k] = weight[k]*weightMask[k];

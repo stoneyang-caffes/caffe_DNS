@@ -91,6 +91,17 @@ __global__ void CCNzeroCollect(const int n, const Dtype* mask, unsigned int* cou
 }
 
 template <typename Dtype>
+__global__ void CHMaskCalc(const int n, const Dtype* wb, Dtype* mask, Dtype pruning_threshold) {
+  CUDA_KERNEL_LOOP(index, n) {
+    if (fabs(wb[index]) >= pruning_threshold) {
+      mask[index] = 1;
+	} else if (fabs(wb[index]) < pruning_threshold) {
+      mask[index] = 0;
+	}
+  }
+}
+
+template <typename Dtype>
 __global__ void CCMaskCalc(const int n, const Dtype* wb,
     Dtype* mask, Dtype mu, Dtype std, Dtype r) {
   CUDA_KERNEL_LOOP(index, n) {
@@ -175,9 +186,10 @@ void CInnerProductLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
     bias = this->blobs_[1]->mutable_gpu_data();   
     biasMask = this->blobs_[3]->mutable_gpu_data();
     biasTmp = this->bias_tmp_.mutable_gpu_data();
-  }   
+  }
     
-  if (this->phase_ == TRAIN) {
+  if (this->phase_ == TRAIN && this->pruning_type == "dns") {
+    /************ For dynamic network surgery ***************/
     // Calculate the mean and standard deviation of learnable parameters 		
     if (this->std == 0 && this->iter_ == 0) {
       unsigned int ncount = 0;
@@ -189,20 +201,10 @@ void CInnerProductLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
       this->std -= ncount*mu*mu;
       this->std /= ncount;
       this->std = sqrt(std);
-      LOG(INFO) << mu << "  " << std << "  " << ncount;
+      LOG(INFO) << "Mean value: " << mu;
+      LOG(INFO) << "Std. variance: " << std;
+      LOG(INFO) << "Non-zero count: " << ncount;
     }
-
-    // Demonstrate the sparsity of compressed fully-connected layer
-    /********************************************************/
-    if (this->iter_ % 100 == 0) {
-      unsigned int ncount = 0;
-      CCNZeroCalc(this->blobs_[0]->count(), weightMask, &ncount);
-      if (this->bias_term_) {
-        CCNZeroCalc(this->blobs_[1]->count(), biasMask, &ncount);
-      }
-      LOG(INFO) << ncount;
-    }	
-    /********************************************************/		
 		
     // Calculate the weight mask and bias mask with probability
     Dtype r = static_cast<Dtype>(rand())/static_cast<Dtype>(RAND_MAX);
@@ -216,7 +218,35 @@ void CInnerProductLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
         CUDA_POST_KERNEL_CHECK;  
       }
     }
+  } else if (this->phase_ == TRAIN && this->pruning_type == "han") {
+    /*************** For Han Song's method ******************/
+    if (this->iter_ == 0) {
+      CHMaskCalc<Dtype><<<CAFFE_GET_BLOCKS(this->blobs_[0]->count()), 
+        CAFFE_CUDA_NUM_THREADS>>>(this->blobs_[0]->count(), weight, weightMask, this->pruning_threshold);
+      CUDA_POST_KERNEL_CHECK;
+      // (FanYang) bias masks generation, we temporarilly do not support this
+      // if (this->bias_term_) {
+        // CHMaskCalc<Dtype><<<CAFFE_GET_BLOCKS(this->blobs_[1]->count()), 
+          // CAFFE_CUDA_NUM_THREADS>>>(this->blobs_[1]->count(), bias, biasMask, this->pruning_threshold);
+        // CUDA_POST_KERNEL_CHECK;
+      // }
+      // (FanYang) bias masks generation, we temporarilly do not support this  
+      /********************************************************/
+    }
   }
+
+  // Demonstrate the sparsity of compressed fully-connected layer
+  /********************************************************/
+  if (this->iter_ % 1000 == 0 && this->iter_ != 0) {
+    unsigned int ncount = 0;
+    CCNZeroCalc(this->blobs_[0]->count(), weightMask, &ncount);
+    if (this->bias_term_) {
+      CCNZeroCalc(this->blobs_[1]->count(), biasMask, &ncount);
+    }
+    LOG(INFO) << "Current non-zero count: " << ncount;
+    LOG(INFO) << "Current sparsity ratio: " << 1. - ncount / float(this->blobs_[0]->count());
+  }	
+  /********************************************************/
 
   // Calculate the current (masked) weight and bias
   CCMaskApply<Dtype><<<CAFFE_GET_BLOCKS(this->blobs_[0]->count()),

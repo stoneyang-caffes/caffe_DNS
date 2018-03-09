@@ -1434,6 +1434,8 @@ message CConvolutionParameter {
   optional float c_rate = 4 [default = 3];
   optional FillerParameter weight_mask_filler = 5; // The filler for the weight
   optional FillerParameter bias_mask_filler = 6;   // The filler for the bias
+  optional string pruning_type = 7 [default = 'dns']; // The type of pruning
+  optional float sparsity_ratio = 8; // The sparsity ratio
 }
 
 message CInnerProductParameter {
@@ -1443,4 +1445,6 @@ message CInnerProductParameter {
   optional float c_rate = 4 [default = 3];
   optional FillerParameter weight_mask_filler = 5; // The filler for the weight
   optional FillerParameter bias_mask_filler = 6;   // The filler for the bias
+  optional string pruning_type = 7 [default = 'dns']; // The type of pruning
+  optional float sparsity_ratio = 8; // The sparsity ratio
 }
